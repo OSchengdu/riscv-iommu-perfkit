@@ -1,174 +1,248 @@
-以下是针对RISC-V IOMMU HPM/Nested测试方案的构建要求和交付内容的具体说明，结合数据中心场景需求：
+## 裸机
+
+在PolyCtrlOS裸机环境和Linux/EulixOS环境下实现RISC-V IOMMU HPM和Nested测试）的实施方案设计：
 
 ---
 
-### **一、构建要求**
-#### **1. 硬件/仿真环境**
-| **组件**              | **要求**                                                                 |
-|-----------------------|-------------------------------------------------------------------------|
-| **QEMU**              | ≥7.2.0，需启用RISC-V IOMMU和AIA扩展：<br>`./configure --target-list=riscv64-softmmu --enable-kvm --enable-slirp` |
-| **仿真平台**          | QEMU参数需包含：<br>`-M virt,aia=aplic-imsic -cpu rv64,smaia=true,ssaia=true` |
-| **宿主系统**          | x86_64 Ubuntu 22.04+，需安装交叉编译工具链（riscv64-linux-gnu-）           |
+### **一、硬件性能监控（HPM）实现方案**
 
-#### **2. 软件依赖**
-```bash
-# 宿主系统依赖
-sudo apt install -y gcc-riscv64-linux-gnu debootstrap qemu-system-riscv64 \
-     libssl-dev device-tree-compiler python3-pip flex bison bc \
-     linux-tools-common libelf-dev libdw-dev zlib1g-dev
+#### **1. PolyCtrlOS裸机实现**
+**核心步骤**：
 
-# 目标系统（RISC-V RootFS）依赖
-chroot $ROOTFS apt install -y linux-perf stress-ng iommu-tools
-```
+1. **计数器寄存器访问**：
+   ```asm
+   # 示例：读取TLB缺失计数器
+   csrr a0, iommu_tlb_miss_counter  # 伪指令，实际寄存器地址参考SPEC
+   sw a0, 0(s0)  # 存储到内存
+   ```
 
-#### **3. 内核配置**
-必须启用的关键选项：
-```text
-CONFIG_RISCV_IOMMU=y
-CONFIG_RISCV_IOMMU_HPM=y      # HPM支持
-CONFIG_IOMMUFD=y              # 嵌套IOMMU依赖
-CONFIG_PERF_EVENTS=y
-CONFIG_DEBUG_FS=y             # 性能数据导出
-```
+2. **事件触发设计**：
+   
+   ```c
+   // 在C代码中嵌入汇编触发DMA
+   void trigger_dma() {
+     asm volatile (
+       "li t0, DEVICE_BASE\n"
+       "sw a0, 0(t0)\n"  // 启动设备DMA
+       ::: "t0"
+     );
+   }
+   ```
+   
+3. **监控框架**：
+   
+   ```c
+   struct iommu_hpm_event {
+     uint32_t event_id;
+     uint64_t count;
+   };
+   
+   void monitor_events(struct iommu_hpm_event *events, int num) {
+     for (int i = 0; i < num; i++) {
+       events[i].count = read_counter(events[i].event_id);
+     }
+   }
+   ```
+
+
+
+#### **2. Linux/EulixOS实现**
+**替代perf的方案**： 
+
+1. **内核驱动直接访问**：
+   
+   ```c
+   // 示例驱动代码
+   static ssize_t read_counter(struct file *file, char __user *buf, size_t count, loff_t *ppos) {
+     u64 val = readq(iommu_base + IOMMU_PMU_OFFSET);
+     copy_to_user(buf, &val, sizeof(val));
+   }
+   ```
+   
+2. **用户空间工具**： 
+   ```bash
+   # 直接读取/sys/kernel/iommu_pmu接口
+   cat /sys/kernel/iommu_pmu/tlb_miss
+   ```
+
+**EulixOS适配**：
+- 复用现有ACPI/DT解析代码获取IOMMU PMU资源
+- 扩展`/proc/iommu`接口输出性能数据
 
 ---
 
-### **二、交付的HPM测试代码**
-#### **1. 核心测试模块**
-需交付的代码结构：
-```text
-riscv-iommu-hpm-tests/
-├── perf_events/               # HPM性能事件测试
-│   ├── iommu_counting.c       # 计数模式测试（如IOMMU请求数）
-│   └── iommu_sampling.c       # 采样模式测试（如TLB缺失追踪）
-├── nested/                    # 嵌套IOMMU功能测试
-│   ├── stage1_flush_test.c    # g-stage无效化验证
-│   └── nested_xlate_bench.c   # 两阶段转换延迟测试
-└── utils/
-    ├── iommu_pmu_helper.h     # PMU寄存器操作封装
-    └── dma_mock.c             # 模拟设备DMA请求
+### **二、嵌套IOMMU实现方案**
+
+#### **1. PolyCtrlOS裸机实现**
+**核心流程**：
+
+```asm
+# 两阶段页表配置示例
+# Stage1: GVA→GPA
+li t0, gpt_base   # Guest页表基址
+csrw iommu_gptbr, t0
+
+# Stage2: GPA→HPA
+li t0, hpt_base   # Host页表基址
+csrw iommu_hptbr, t0
+
+# 启用嵌套模式
+li t0, IOMMU_NESTED_EN
+csrs iommu_ctrl, t0
 ```
 
-#### **2. 关键代码示例（HPM计数测试）**
+**异常处理**：
+```asm
+# 嵌套异常入口
+iommu_nested_exception:
+  csrr t0, iommu_cause  # 读取异常原因
+  # 根据原因跳转到Guest或Host处理程序
+  bgez t0, handle_guest_fault
+  j handle_host_fault
+```
+
+#### **2. Linux/EulixOS实现**
+**KVM扩展方案**：
 ```c
-// iommu_counting.c
-#include "iommu_pmu_helper.h"
+// QEMU设备树添加嵌套支持
+static Property riscv_iommu_props[] = {
+    DEFINE_PROP_BOOL("nested", RISCVIOMMUState, nested, false),
+    ...
+};
 
-#define IOMMU_PMU_EVENT 0x02  // iommu_requests事件编码
-
-int main() {
-    struct iommu_pmu_config cfg = {
-        .event_id = IOMMU_PMU_EVENT,
-        .filter_pasid = 0x1,   // 监控特定PASID
-        .mode = COUNTING_MODE
-    };
-
-    // 初始化PMU
-    iommu_pmu_init(&cfg);
-
-    // 触发DMA操作
-    system("dd if=/dev/zero of=/dev/dma_device bs=1M count=1000");
-
-    // 读取计数器
-    uint64_t count = iommu_pmu_read_counter();
-    printf("IOMMU requests: %lu\n", count);
-
-    return 0;
-}
+// KVM ioctl扩展
+ioctl(vm_fd, KVM_SET_NESTED_IOMMU, &config);
 ```
 
-#### **3. 测试脚本**
-需交付的自动化脚本：
-```bash
-#!/bin/bash
-# run_hpm_tests.sh
+**测试用例设计**：
+1. **静态映射测试**：
+   ```bash
+   # Guest内操作
+   echo 0x80000000 > /sys/iommu/gpa_map  # GVA→GPA
+   # Host操作
+   echo "0x80000000 0x40000000" > /sys/kernel/iommu/nested_map  # GPA→HPA
+   ```
 
-# 1. 启动QEMU
-qemu-system-riscv64 -kernel $LINUX/arch/riscv/boot/Image \
-  -drive file=$ROOTFS/ubuntu-riscv.img,format=raw \
-  -append "root=/dev/vda iommu.pmu=on" &
+2. **动态迁移测试**：
+   ```c
+   // 触发Guest页表变化后
+   kvm_iommu_sync_nested(vcpu);
+   ```
 
-# 2. 执行测试
-ssh root@localhost -p 2222 <<EOF
-  cd /root/riscv-iommu-hpm-tests
-  make && ./run_all_tests.sh
-  perf stat -e riscv_iommu/iommu_requests/ -a sleep 5
-EOF
+---
 
-# 3. 生成报告
-python3 generate_report.py --input test_logs/ --output hpm_report.html
+### **三、跨环境统一测试框架**
+
+#### **1. 通用测试向量生成**
+```python
+# 测试模式生成器
+def gen_dma_pattern():
+    patterns = [
+        {"type": "linear", "range": (0x0, 0x100000)},
+        {"type": "random", "count": 1000}
+    ]
+    return json.dumps(patterns)
+```
+
+#### **2. 结果对比机制**
+| **指标**     | PolyCtrlOS采集方式 | Linux采集方式          | 容许误差 |
+| ------------ | ------------------ | ---------------------- | -------- |
+| TLB缺失次数  | 直接读CSR          | perf stat -e iommu/... | ≤3%      |
+| 嵌套翻译延迟 | 时钟周期计数器     | ftrace事件             | ±10ns    |
+
+#### **3. 自动化验证流程**
+```mermaid
+graph TD
+    A[生成测试模式] --> B(PolyCtrlOS裸机执行)
+    A --> C(Linux环境执行)
+    B --> D[原始计数器数据]
+    C --> E[Perf数据]
+    D & E --> F[一致性分析]
+    F --> G[生成报告]
 ```
 
 ---
 
-### **三、交付文档要求**
-#### **1. 测试设计文档**
-需包含：
-- **HPM事件列表**：对应`/sys/bus/event_source/devices/riscv_iommu/events`的详细说明
-- **测试场景矩阵**：
-  | **测试类型**   | **触发条件**              | **预期结果**                  |
-  |---------------|--------------------------|-----------------------------|
-  | 计数模式       | 持续DMA压力              | 计数器线性增长                |
-  | 采样模式       | 随机GPA-HPA映射变更       | 捕获TLB失效事件               |
+### **四、关键实现提示**
 
-#### **2. 性能分析报告模板**
-```markdown
-## RISC-V IOMMU HPM测试报告
-### 测试环境
-- QEMU版本: 7.2.0
-- 内核补丁: [Zong Li HPM v2](https://lore.kernel.org/all/20240614142156.29420-2-zong.li@sifive.com/)
+1. **寄存器级调试**：
+   - 使用OpenOCD连接开发板时，直接检查IOMMU寄存器：
+     ```tcl
+     # OpenOCD命令
+     mww 0x1A0000 0x80000000  # 配置IOMMU基址
+     mdw 0x1A0008 4           # 读取TLB计数器
+     ```
 
-### 关键指标
-| 测试项         | 数值       | 对比参考(x86 VT-d) |
-|----------------|-----------|-------------------|
-| IOMMU请求延迟   | 152ns     | 89ns              |
-| TLB命中率       | 98.2%     | 99.5%             |
+2. **QEMU调试技巧**：
+   ```bash
+   # 启动QEMU时添加IOMMU调试输出
+   qemu-system-riscv64 -d iommu,trace:iommu_* -D iommu.log ...
+   ```
 
-### 问题发现
-1. PASID缓存冲突率较高（12%），建议优化缓存替换算法
-2. 嵌套翻译延迟标准差达±15ns，存在抖动
-```
-
-#### **3. 构建指南**
-需明确：
-```text
-1. 内核编译步骤：
-   make ARCH=riscv CROSS_COMPILE=riscv64-linux-gnu- \
-    CONFIG_RISCV_IOMMU_HPM=y
-
-2. Perf工具交叉编译：
-   cd $LINUX/tools/perf && make \
-    ARCH=riscv CROSS_COMPILE=riscv64-linux-gnu- \
-    NO_LIBBPF=1
-```
+3. **RISC-V SPEC重点章节**：
+   
+   - Volume II: Chapter 10 "IOMMU Architecture"
+   - Volume I: "CSR Mapping for IOMMU PMU"
 
 ---
 
-### **四、扩展要求（Nested IOMMU）**
-#### **1. 测试重点**
-- **地址转换正确性**：GVA→GPA→HPA的级联映射验证
-- **TLB一致性**：修改stage-1页表后的`iotlb_sync_map`调用验证
-- **异常传递**：客户机IO页错误是否正确触发宿主ECALL
+### **五、测试阶段规划**
 
-#### **2. 参考测试用例**
-```c
-// nested_xlate_bench.c
-void test_nested_latency() {
-    start_timer();
-    // 触发嵌套转换
-    device_dma(gva);
-    uint64_t latency = stop_timer();
-    
-    assert(latency < 500); // 阈值根据硬件调整
-    log("Nested translate latency: %luns", latency);
-}
-```
+1. **阶段1（基础）**：
+   - PolyCtrlOS实现CSR访问
+   - QEMU验证单阶段转换
 
----
+2. **阶段2（HPM）**：
+   - 裸机计数器校准
+   - Linux驱动性能数据比对
 
-### **五、验证方法**
-1. **单元测试**：通过QEMU的`-d guest_errors`捕获地址转换错误
-2. **性能验证**：使用`perf stat`对比启用/禁用HPM的开销
-3. **压力测试**：`stress-ng --vm-bytes 4G`下持续运行24小时
+3. **阶段3（Nested）**：
+   - 扩展QEMU嵌套模拟
+   - 跨环境异常处理验证
 
-该方案可直接集成到openEuler的CI/CD流程，建议配合[LKP](https://github.com/intel/lkp-tests)进行自动化性能回归测试。 
+4. **阶段4（整合）**：
+   - 自动化测试框架集成
+   - 发布测试规范文档
+
+建议优先在QEMU仿真环境中验证基础机制，再移植到真实硬件。对于PolyCtrlOS，可从最小化的IOMMU初始化代码开始逐步扩展功能。
+
+# kselftest分析
+
+
+
+# 参考
+
+## ARM
+
+[intro](https://www.openeuler.org/zh/blog/wxggg/2020-11-21-iommu-smmu-intro.html)
+
+## X86
+
+
+
+# 测试
+
+
+
+## 核心
+
+
+
+## 基础功能
+
+
+
+## 性能监控的选型和多样性融合
+
+
+
+## 潜套翻译测试
+
+
+
+## 工具链
+
+
+
+## 环境部署
+
