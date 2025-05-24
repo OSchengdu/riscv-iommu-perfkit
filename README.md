@@ -1,7 +1,3 @@
-以下是针对RISC-V IOMMU HPM/Nested测试方案的构建要求和交付内容的具体说明，结合数据中心场景需求：
-
----
-
 ### **一、构建要求**
 #### **1. 硬件/仿真环境**
 | **组件**              | **要求**                                                                 |
@@ -12,12 +8,13 @@
 
 #### **2. 软件依赖**
 ```bash
-# 宿主系统依赖
 sudo apt install -y gcc-riscv64-linux-gnu debootstrap qemu-system-riscv64 \
      libssl-dev device-tree-compiler python3-pip flex bison bc \
      linux-tools-common libelf-dev libdw-dev zlib1g-dev
+# qemu
+# kernel build
+# rootfs
 
-# 目标系统（RISC-V RootFS）依赖
 chroot $ROOTFS apt install -y linux-perf stress-ng iommu-tools
 ```
 
@@ -29,6 +26,17 @@ CONFIG_RISCV_IOMMU_HPM=y      # HPM支持
 CONFIG_IOMMUFD=y              # 嵌套IOMMU依赖
 CONFIG_PERF_EVENTS=y
 CONFIG_DEBUG_FS=y             # 性能数据导出
+```
+
+#### 4. 分析
+
+1. 进入后，需要确认iommu和hpm的支持情况
+2. 监听iommu,`sudo perf stat -e iommu/* -a sleep 10`<br>
+记录并分析调用栈：
+
+```
+sudo perf record -e iommu/* -ag -- sleep 10
+sudo perf report
 ```
 
 ---
@@ -50,34 +58,19 @@ riscv-iommu-hpm-tests/
 ```
 
 #### **2. 关键代码示例（HPM计数测试）**
-```c
-// iommu_counting.c
-#include "iommu_pmu_helper.h"
 
-#define IOMMU_PMU_EVENT 0x02  // iommu_requests事件编码
-
-int main() {
-    struct iommu_pmu_config cfg = {
-        .event_id = IOMMU_PMU_EVENT,
-        .filter_pasid = 0x1,   // 监控特定PASID
-        .mode = COUNTING_MODE
-    };
-
-    // 初始化PMU
-    iommu_pmu_init(&cfg);
-
-    // 触发DMA操作
-    system("dd if=/dev/zero of=/dev/dma_device bs=1M count=1000");
-
-    // 读取计数器
-    uint64_t count = iommu_pmu_read_counter();
-    printf("IOMMU requests: %lu\n", count);
-
-    return 0;
-}
+```
 ```
 
-#### **3. 测试脚本**
+#### 3. 测试样例
+
+1. 计数器模式测试，检验iommu pmu 事件的计数是否正常工作
+2. 采样模式测试， 捕获相关事件的调用路径
+
+3. 
+
+#### **4. 测试脚本**
+
 需交付的自动化脚本：
 ```bash
 #!/bin/bash
@@ -102,10 +95,14 @@ python3 generate_report.py --input test_logs/ --output hpm_report.html
 ---
 
 ### **三、交付文档要求**
+
+以下基于qemu-riscv（$QEMU/build/qemu-system-riscv64）
+
 #### **1. 测试设计文档**
 需包含：
 - **HPM事件列表**：对应`/sys/bus/event_source/devices/riscv_iommu/events`的详细说明
 - **测试场景矩阵**：
+  
   | **测试类型**   | **触发条件**              | **预期结果**                  |
   |---------------|--------------------------|-----------------------------|
   | 计数模式       | 持续DMA压力              | 计数器线性增长                |
@@ -129,7 +126,7 @@ python3 generate_report.py --input test_logs/ --output hpm_report.html
 2. 嵌套翻译延迟标准差达±15ns，存在抖动
 ```
 
-#### **3. 构建指南**
+#### **3. qemu-riscv的完整构建**
 需明确：
 ```text
 1. 内核编译步骤：
@@ -141,34 +138,3 @@ python3 generate_report.py --input test_logs/ --output hpm_report.html
     ARCH=riscv CROSS_COMPILE=riscv64-linux-gnu- \
     NO_LIBBPF=1
 ```
-
----
-
-### **四、扩展要求（Nested IOMMU）**
-#### **1. 测试重点**
-- **地址转换正确性**：GVA→GPA→HPA的级联映射验证
-- **TLB一致性**：修改stage-1页表后的`iotlb_sync_map`调用验证
-- **异常传递**：客户机IO页错误是否正确触发宿主ECALL
-
-#### **2. 参考测试用例**
-```c
-// nested_xlate_bench.c
-void test_nested_latency() {
-    start_timer();
-    // 触发嵌套转换
-    device_dma(gva);
-    uint64_t latency = stop_timer();
-    
-    assert(latency < 500); // 阈值根据硬件调整
-    log("Nested translate latency: %luns", latency);
-}
-```
-
----
-
-### **五、验证方法**
-1. **单元测试**：通过QEMU的`-d guest_errors`捕获地址转换错误
-2. **性能验证**：使用`perf stat`对比启用/禁用HPM的开销
-3. **压力测试**：`stress-ng --vm-bytes 4G`下持续运行24小时
-
-该方案可直接集成到openEuler的CI/CD流程，建议配合[LKP](https://github.com/intel/lkp-tests)进行自动化性能回归测试。 
