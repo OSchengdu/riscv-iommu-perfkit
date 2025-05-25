@@ -46,28 +46,3 @@ deliverables/
 └── README.md                 # 项目总说明
 ```
 
-#### **关键文件内容要求**
-1. **`BUILD.md` 必须包含**：
-   ```markdown
-   ## 内核补丁应用
-   git am <path-to-zong-li-patches/*.patch>
-
-   ## 内核配置
-   CONFIG_RISCV_IOMMU_HPM=y
-   CONFIG_PERF_EVENTS=y
-
-   ## RootFS 准备
-   debootstrap --arch=riscv64 jammy ./rootfs http://ports.ubuntu.com/ubuntu-ports
-   ```
-
-2. **`HPM_TEST_RESULTS.md` 示例**：
-   ```markdown
-   ## TLB 命中率测试
-   | 测试场景       | 命中率 | 平均延迟(ns) |
-   |----------------|--------|-------------|
-   | 单设备 DMA      98.7%  | 120         |
-   | 多设备并发     | 95.2%  | 210         |
-   ```
-
----
-|
