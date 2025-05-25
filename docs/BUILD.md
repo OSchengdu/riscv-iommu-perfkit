@@ -94,7 +94,7 @@ $QEMU/build/qemu-system-riscv64 -M virt,aia=aplic-imsic,aia-guests=5 -cpu rv64,s
 
 自此可以开始测试工作
 
-
+![](../images/1.png)
 
 ## 测试
 详见文件夹下的另外两个文件，HPM_TEST_REPORT.md和HPM_TEST_SAMPLE.md
