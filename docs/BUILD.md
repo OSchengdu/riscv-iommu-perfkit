@@ -1,7 +1,14 @@
-基于ubuntu，x86_64(thinkpad x230t), 对ubuntu-riscv有依赖
+>  基于ubuntu，x86_64(thinkpad x230t), 对ubuntu-riscv有依赖
+>
+>  
+
+
+
+---
+
 ## 依赖
 
-1. apt包
+1. **apt包**
 
 ```
 sudo apt update && sudo apt install -y gcc-riscv64-linux-gnu debootstrap qemu-system-riscv64 \
@@ -10,7 +17,7 @@ sudo apt update && sudo apt install -y gcc-riscv64-linux-gnu debootstrap qemu-sy
 ```
 
 
-2. 环境声明（可选）
+2. **环境声明（可选）**
 
 ```
 export WORKSPACE=/<path-to-workspace>
@@ -21,9 +28,11 @@ export SYSROOT=$ROOTFS/temp-rootfs
 cd $WORKSPACE
 ```
 
-## 工具构建
 
-1. qemu-riscv(customized)
+
+## 工具构建和制定
+
+1. **qemu-riscv**
 
 ```
 git clone --depth=1 -b ctr_upstream --recurse-submodules -j8 https://github.com/rajnesh-kanwal/qemu.git $QEMU
@@ -35,7 +44,7 @@ cd ../roms/
 make opensbi64-generic
 ```
 
-2. linux kernel
+2. **linux kernel**
 
 
 ```
@@ -49,7 +58,8 @@ make O=./build -j$(nproc)
 cd ..
 ```
 
-3. rootfs
+3. **rootfs**
+   - 预备rootfs
 
 ```
 mkdir $ROOTFS && cd $ROOTFS
@@ -59,16 +69,16 @@ chmod +x ./create_rootfs.sh
 
 ```
 
-4. crossing-compile perf
-
-这是重点的步骤，因为参考是无法完全在这使用的
+4. **crossing-compile perf**
+   - 这是重点的步骤，因为参考是无法完全在这使用的
 
 ```
 cd $LINUX/tools/perf
 sudo -E PKG_CONFIG_LIBDIR="$SYSROOT/usr/lib/riscv64-linux-gnu/pkgconfig/"   VF=1 make EXTRA_CFLAGS="--sysroot=$SYSROOT"   ARCH=riscv CROSS_COMPILE=riscv64-linux-gnu-   NO_LIBBPF=1 prefix='$(SYSROOT)/usr' NO_LIBAUDIT=1 NO_LIBBPF=1 ARCH=riscv CROSS_COMPILE=riscv64-linux-gnu-  install
 ```
 
-5. run
+5. **run**
+   - 制作镜像文件和启动
 
 
 ```
@@ -84,9 +94,10 @@ $QEMU/build/qemu-system-riscv64 -M virt,aia=aplic-imsic,aia-guests=5 -cpu rv64,s
 
 自此可以开始测试工作
 
+
+
 ## 测试
 详见文件夹下的另外两个文件，HPM_TEST_REPORT.md和HPM_TEST_SAMPLE.md
-1. 运行
-
-2. 测试
+1. [运行](./HPM_TEST_REPORT.md)
+2. [测试](./HPM_TEST_SAMPLE.md)
 
