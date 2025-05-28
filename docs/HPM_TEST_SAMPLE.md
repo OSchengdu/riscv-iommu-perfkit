@@ -1,154 +1,38 @@
-# 测试
-
-在 RISC-V 架构下进行 IOMMU (Input-Output Memory Management Unit) 和 HPM (Hardware Performance Monitoring) 的全面测试，需要结合硬件特性、内核驱动和用户态工具。补充 `iommu-selftests` 的不足，以下是分步骤的测试方案：
+以下是使用 `perf` 工具测试 **IOMMU** 和 **HPM (Hardware Performance Monitoring)** 的详细测试项表格，包含具体的测试步骤和预期结果：
 
 ---
 
-### **1. 验证硬件和内核支持**
-#### **检查 IOMMU 和 HPM 驱动**
-```bash
-# 查看内核是否启用 IOMMU
-dmesg | grep -i iommu
-cat /proc/cmdline | grep iommu  # 检查内核参数
-
-# 确认 HPM 支持
-ls /sys/bus/event_source/devices/ | grep hpm  # 或 pmu
-perf list | grep -i hpm
-```
-
-#### **验证设备拓扑**
-```bash
-lspci -tv           # PCI 设备树
-ls /sys/kernel/iommu_groups/  # IOMMU 分组
-```
+### **1. IOMMU & HPM 性能事件测试表**
+| **测试项**               | **测试命令**                                                 | **测试步骤**                                                 | **预期结果/监控指标**                |
+| ------------------------ | ------------------------------------------------------------ | ------------------------------------------------------------ | ------------------------------------ |
+| **IOMMU TLB 命中率**     | `perf stat -e iommu/tlb_read_hit/,iommu/tlb_read_miss/ -a sleep 10` | 1. 运行命令监控10秒<br>2. 同时触发DMA操作（如`dd`）<br>3. 记录命中/缺失次数 | 命中率 > 90%，无异常错误             |
+| **IOMMU 上下文缓存效率** | `perf stat -e iommu/context_cache_hit/,iommu/context_cache_miss/ -a sleep 5` | 1. 多设备并发DMA操作<br>2. 观察缓存命中情况                  | 缓存命中率稳定，无剧烈波动           |
+| **DMA 映射延迟**         | `perf probe -a iommu_map`<br>`perf stat -e probe:iommu_map -a sleep 5` | 1. 动态追踪`iommu_map`函数<br>2. 运行DMA操作<br>3. 统计平均延迟 | 延迟 < 50μs（依赖硬件）              |
+| **IOMMU 缺页异常**       | `perf stat -e iommu/io_page_fault/ -a sleep 5`               | 1. 故意访问未映射的DMA地址<br>2. 监控缺页异常次数            | 记录到预期异常，无内核崩溃           |
+| **HPM 时钟周期统计**     | `perf stat -e cycles,riscv_hpm/cycles/ -a sleep 10`          | 1. 空载运行10秒<br>2. 高负载运行（如`stress-ng`）<br>3. 对比周期数 | 负载周期数显著高于空载               |
+| **内存访问带宽**         | `perf stat -e mem/loads/,mem/stores/ -a -- dd if=/dev/zero of=/dev/null bs=1G count=1` | 1. 执行大内存操作<br>2. 统计加载/存储次数                    | 带宽与硬件理论值匹配（如 DDR4 带宽） |
 
 ---
 
-### **2. 基础功能测试**
-#### **IOMMU 基本测试**
-1. **DMA 隔离测试**  
-   
-   - 使用 `dd` 和 `dma_map` 测试不同设备的内存隔离
-   - 通过 `iommu-selftests` 运行基础用例
-   
-2. **设备透传测试**  
-   
-   - 将设备绑定到 VFIO 驱动并验证透传：
-     ```bash
-     echo 0000:01:00.0 > /sys/bus/pci/devices/0000:01:00.0/driver/unbind
-     echo vfio-pci > /sys/bus/pci/devices/0000:01:00.0/driver_override
-     echo 0000:01:00.0 > /sys/bus/pci/drivers/vfio-pci/bind
-     ```
-
-#### **HPM 性能监控**
-1. **Perf 事件采集**  
-   - 监控 IOMMU 相关事件（如 TLB 命中/缺失）：
-     ```bash
-     perf stat -e iommu/tlb_read_hit/,iommu/tlb_read_miss/ -a sleep 5
-     ```
-   - 自定义 HPM 事件（需硬件支持）：
-     ```bash
-     perf stat -e rXXXX -a sleep 5  # XXXX 为硬件事件编码
-     ```
+### **2. 高级追踪与分析测试表**
+| **测试项**           | **测试命令**                                                 | **测试步骤**                                                 | **预期结果/监控指标**          |
+| -------------------- | ------------------------------------------------------------ | ------------------------------------------------------------ | ------------------------------ |
+| **IOMMU 函数调用链** | `perf record -e probe:iommu* -ag -- sleep 10`<br>`perf report --stdio` | 1. 动态追踪所有`iommu_*`函数<br>2. 生成调用图<br>3. 分析热点路径 | 无异常递归或阻塞调用           |
+| **中断延迟分析**     | `perf sched latency`                                         | 1. 运行实时任务<br>2. 监控调度延迟<br>3. 结合IOMMU中断日志（`dmesg`） | 中断延迟 < 100μs（实时性要求） |
+| **多核竞争分析**     | `perf stat -e cache-misses -C 0,1 -- stress-ng --dma 2`      | 1. 绑定DMA到特定CPU核心<br>2. 监控缓存缺失<br>3. 检查IOMMU锁竞争 | 缓存缺失率无异常飙升           |
+| **PMU 自定义事件**   | `perf stat -e rXXXX -a sleep 5` (XXXX为硬件事件编码)         | 1. 查阅芯片手册定义事件编码<br>2. 监控自定义事件（如TLB预取）<br>3. 验证功能 | 事件计数器正常递增             |
 
 ---
 
-### **3. 高级测试（补充 iommu-selftests 不足）**
-#### **压力测试**
-1. **IOMMU 内存压力测试**  
-   - 使用 `stress-ng` 模拟高负载 DMA：
-     ```bash
-     stress-ng --dma 4 --timeout 60
-     dmesg | grep -i iommu  # 检查错误日志
-     ```
-
-2. **多设备并发 DMA**  
-   - 并行触发多个设备的 DMA 操作，验证 IOMMU 隔离性：
-     ```bash
-     for i in $(seq 1 4); do
-         dd if=/dev/zero of=/dev/dma_device$i bs=1M count=100 &
-     done
-     wait
-     ```
-
-#### **延迟和吞吐量测试**
-1. **IOMMU 映射延迟**  
-   - 使用 `perf` 测量 `iommu_map`/`iommu_unmap` 内核函数延迟：
-     ```bash
-     perf probe -a iommu_map
-     perf stat -e probe:iommu_map -a sleep 5
-     ```
-
-2. **DMA 带宽测试**  
-   - 通过 `dd` 或专用工具（如 `iperf` 结合 RDMA）测量带宽：
-     ```bash
-     dd if=/dev/zero of=/dev/dma_device bs=1G count=10 oflag=direct
-     ```
+### **3. 压力测试与故障注入表**
+| **测试项**             | **测试命令**                                                 | **测试步骤**                                                 | **预期结果/监控指标** |
+| ---------------------- | ------------------------------------------------------------ | ------------------------------------------------------------ | --------------------- |
+| **高并发 DMA 压力**    | `perf stat -e iommu/* -a -- stress-ng --dma 8 --timeout 60`  | 1. 启动8个DMA线程<br>2. 监控IOMMU事件<br>3. 检查错误日志     | 无TLB崩溃或上下文泄漏 |
+| **内存碎片化下的 DMA** | `perf stat -e iommu/* -a -- stress-ng --vm 4 --vm-bytes 2G & dd if=/dev/zero of=/dev/dma bs=1G` | 1. 碎片化内存后执行DMA<br>2. 观察IOMMU页表分配延迟           | 延迟波动在合理范围内  |
+| **错误恢复时间测试**   | `perf probe -a iommu_fault`<br>`perf stat -e probe:iommu_fault -a` | 1. 注入IOMMU错误（`echo 1 > /sys/kernel/debug/iommu/fault_inject`）<br>2. 测量恢复时间 | 恢复时间 < 1s         |
 
 ---
 
-### **4. 故障注入测试**
-#### **模拟错误场景**
-1. **注入 IOMMU 错误**  
-   
-   - 使用 `echo` 手动触发错误（需内核支持）：
-     ```bash
-     echo 1 > /sys/kernel/debug/iommu/fault_inject
-     dmesg | grep -i fault
-     ```
-   
-2. **内存不足测试**  
-   - 限制 IOMMU 内存池并触发 DMA：
-     ```bash
-     echo 1M > /sys/kernel/iommu_groups/0/limit
-     dd if=/dev/zero of=/dev/dma_device bs=2M count=1  # 应失败
-     ```
 
----
 
-### **5. 自动化测试框架**
-#### **扩展 iommu-selftests**
-1. **添加自定义测试用例**  
-   - 在 `tools/testing/selftests/iommu/` 中新增脚本，例如：
-     ```bash
-     #!/bin/bash
-     # 测试 IOMMU 映射泄漏
-     for i in $(seq 1 1000); do
-         echo "Test $i" > /dev/dma_device
-     done
-     grep "iommu leak" /var/log/kern.log
-     ```
-
-2. **集成到内核 CI**  
-   - 修改 `tools/testing/selftests/iommu/Makefile` 包含新测试。
-
----
-
-### **6. 性能调优与监控**
-#### **实时监控工具**
-1. **动态跟踪**  
-   
-   - 使用 `ftrace` 跟踪 IOMMU 函数调用：
-     ```bash
-     echo 1 > /sys/kernel/debug/tracing/events/iommu/enable
-     cat /sys/kernel/debug/tracing/trace_pipe
-     ```
-   
-2. **Perf 火焰图**  
-   - 生成 IOMMU 相关调用的火焰图：
-     ```bash
-     perf record -e iommu:* -ag -- sleep 10
-     perf script | flamegraph.pl > iommu.svg
-     ```
-
----
-
-### **7. 参考测试工具清单**
-| 工具/方法         | 用途             | 示例命令                       |
-| ----------------- | ---------------- | ------------------------------ |
-| `iommu-selftests` | 内核自带基础测试 | `./iommu.sh`                   |
-| `perf`            | 性能事件监控     | `perf stat -e iommu/* -a`      |
-| `stress-ng`       | 压力测试         | `stress-ng --dma 4`            |
-| `ftrace`          | 函数调用跟踪     | `echo 1 > events/iommu/enable` |
-| `vfio-pci`        | 设备透传验证     | 绑定设备到 VFIO 驱动           |
 

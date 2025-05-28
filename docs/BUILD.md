@@ -1,6 +1,5 @@
 >  基于ubuntu，x86_64(thinkpad x230t), 对ubuntu-riscv有依赖
 >
->  
 
 
 
@@ -28,6 +27,35 @@ export SYSROOT=$ROOTFS/temp-rootfs
 cd $WORKSPACE
 ```
 
+3. **内核配置**
+
+```
+CONFIG_RISCV_PMU=y 
+CONFIG_IOMMU=y                
+CONFIG_HW_PAGETABLE=y        
+CONFIG_IOMMU_DMA_SUPPORT=y   
+CONFIG_DMAR=y                
+CONFIG_IOMMU_API=y           
+CONFIG_PERF_EVENTS=y         
+CONFIG_PERF_EVENTS_DEBUG=y   
+CONFIG_RISCV_IOMMU_HPM=y      
+CONFIG_IOMMU_PERFMON=y        
+CONFIG_PERF_COUNT_SW_EVENT=y  
+CONFIG_PERF_COUNT_HW_EVENT=y  
+CONFIG_PERF_SAMPLE_IP=y       
+CONFIG_NESTED_IOMMU=y         
+CONFIG_IOMMU_NESTED=y         
+CONFIG_IOMMU_STAGE1_SUPPORT=y
+CONFIG_IOMMU_STAGE2_SUPPORT=y
+CONFIG_IOMMU_IOTLB_SYNC=y     
+CONFIG_IOMMU_GSTAGE_FLUSH=y   
+CONFIG_DEBUG_IOMMU=y         
+CONFIG_DEBUG_HW_PAGETABLE=y  
+CONFIG_IOMMU_CACHE=y  
+CONFIG_IOMMU_PASID=y  
+CONFIG_IOMMU_SELFTEST=y   
+CONFIG_EXPERIMENTAL=y     
+```
 
 
 ## 工具构建和制定
@@ -79,6 +107,7 @@ sudo -E PKG_CONFIG_LIBDIR="$SYSROOT/usr/lib/riscv64-linux-gnu/pkgconfig/"   VF=1
 
 5. **run**
    - 制作镜像文件和启动
+   - iommu启动大致如下，不同设备间有不同情况
 
 
 ```
@@ -89,7 +118,22 @@ mkdir ./tmp
 sudo mount rootfs.ext4 ./tmp
 sudo cp -rp ./temp-rootfs/* ./tmp/
 sudo umount ./tmp
-$QEMU/build/qemu-system-riscv64 -M virt,aia=aplic-imsic,aia-guests=5 -cpu rv64,smaia=true,ssaia=true,smcdeleg=true,ssccfg=true,smcntrpmf=true,sscofpmf=true,sscsrind=true,smcsrind=true,smctr=true,ssctr=true  -icount auto -m 8192 -nographic -kernel $LINUX/build/arch/riscv/boot/Image -append "root=/dev/vda  rw console=ttyS0 earlycon=sbi" -drive file=$ROOTFS/rootfs.ext4,format=raw,if=none,id=rootfs -device virtio-blk-pci,drive=rootfs  -netdev user,id=usernet,hostfwd=tcp:127.0.0.1:7722-0.0.0.0:22 -device e1000e,netdev=usernet
+
+$QEMU/build/qemu-system-riscv64 \
+  -M virt,aia=aplic-imsic,aia-guests=5 \
+  -cpu rv64,smaia=true,ssaia=true,smcdeleg=true,ssccfg=true,smcntrpmf=true,sscofpmf=true,sscsrind=true,smcsrind=true,smctr=true,ssctr=true \
+  -icount auto -m 8192 -nographic \
+  -kernel $LINUX/build/arch/riscv/boot/Image \
+  -append "root=/dev/vda rw console=ttyS0 earlycon=sbi iommu=force" \
+  -drive file=$ROOTFS/rootfs.ext4,format=raw,if=none,id=rootfs \
+  -device virtio-blk-pci,drive=rootfs \
+  -netdev user,id=usernet,hostfwd=tcp:127.0.0.1:7723-0.0.0.0:22 \
+  -device e1000e,netdev=usernet \
+  -device virtio-iommu-device,iommu_platform=on \ 
+  -object iommu,type=riscv,perfmon=on \  
+  -smp cores=4,threads=1 \
+  -global virtio-mmio.force-legacy=false 
+
 ```
 
 自此可以开始测试工作
