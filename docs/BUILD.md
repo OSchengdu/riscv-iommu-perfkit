@@ -10,9 +10,11 @@
 1. **apt包**
 
 ```
-sudo apt update && sudo apt install -y gcc-riscv64-linux-gnu debootstrap qemu-system-riscv64 \
-     libssl-dev device-tree-compiler python3-pip flex bison bc \
-     linux-tools-common libelf-dev libdw-dev zlib1g-dev
+sudo apt update
+sudo apt install -y git build-essential crossbuild-essential-riscv64 \
+     libssl-dev flex bison bc device-tree-compiler debootstrap \
+     qemu-user-static qemu-system-riscv64 gcc-riscv64-linux-gnu \
+     python3-pip libelf-dev libdw-dev zlib1g-dev libcap-dev
 ```
 
 
@@ -27,7 +29,7 @@ export SYSROOT=$ROOTFS/temp-rootfs
 cd $WORKSPACE
 ```
 
-3. **内核配置**
+3. **内核定制**
 
 ```
 CONFIG_RISCV_PMU=y 
@@ -57,6 +59,7 @@ CONFIG_IOMMU_SELFTEST=y
 CONFIG_EXPERIMENTAL=y     
 ```
 
+直接`cd scripts;chmod +x enable_con.sh; ./enable_con.sh`
 
 ## 工具构建和制定
 
@@ -65,7 +68,7 @@ CONFIG_EXPERIMENTAL=y
 ```
 git clone --depth=1 -b ctr_upstream --recurse-submodules -j8 https://github.com/rajnesh-kanwal/qemu.git $QEMU
 cd $QEMU
-mkdir build && cd ./build
+mkdir -p build && cd ./build
 ../configure --target-list="riscv64-softmmu" --enable-plugins
 make -j$(nproc)
 cd ../roms/
@@ -76,41 +79,31 @@ make opensbi64-generic
 
 
 ```
-git clone --depth=1 -b ctr_upstream -j8 https://github.com/rajnesh-kanwal/linux.git $LINUX
-cd $LINUX
+git clone --depth=1 -b riscv_iommu_v7 https://github.com/tjeznach/linux $LINUX
+cd $LINUX # 有补丁可以用的话得先打上，现在不了（git am
+mkdir -p build
 export ARCH=riscv
-export CROSS_COMPILE=riscv64-unknown-linux-gnu-
-mkdir build
-make O=./build defconfig
-make O=./build -j$(nproc)
-cd ..
+export CROSS_COMPILE=riscv64-linux-gnu-
+make defconfig
+# 启用 IOMMU 和 HPM
+./scripts/config -e IOMMU_SUPPORT -e RISCV_IOMMU -e RISCV_IOMMU_HPM -e PERF_EVENTS
+make defconfig
+make -j$(nproc)
 ```
 
 3. **rootfs**
    - 预备rootfs
 
 ```
-mkdir $ROOTFS && cd $ROOTFS
-wget https://raw.githubusercontent.com/rajnesh-kanwal/common_work/main/rootfs_related/create_rootfs.sh
-chmod +x ./create_rootfs.sh
-./create_rootfs.sh
+mkdir -p $ROOTFS && cd $ROOTFS
 
-```
+sudo -E PKG_CONFIG_LIBDIR="$SYSROOT/usr/lib/riscv64-linux-gnu/pkgconfig/" VF=1 make   EXTRA_CFLAGS="--sysroot=$SYSROOT"   ARCH=riscv  CROSS_COMPILE=riscv64-linux-gnu- NO_LIBBPF=1  prefix='$(SYSROOT)/usr' install
+# 下载 Ubuntu RISC-V 根文件系统
+# sudo debootstrap --arch=riscv64 --foreign jammy $ROOTFS http://ports.ubuntu.com/ubuntu-ports
+# sudo cp /usr/bin/qemu-riscv64-static $ROOTFS/usr/bin/
+# sudo chroot $ROOTFS /debootstrap/debootstrap --second-stage
 
-4. **crossing-compile perf**
-   - 这是重点的步骤，因为参考是无法完全在这使用的
-
-```
-cd $LINUX/tools/perf
-sudo -E PKG_CONFIG_LIBDIR="$SYSROOT/usr/lib/riscv64-linux-gnu/pkgconfig/"   VF=1 make EXTRA_CFLAGS="--sysroot=$SYSROOT"   ARCH=riscv CROSS_COMPILE=riscv64-linux-gnu-   NO_LIBBPF=1 prefix='$(SYSROOT)/usr' NO_LIBAUDIT=1 NO_LIBBPF=1 ARCH=riscv CROSS_COMPILE=riscv64-linux-gnu-  install
-```
-
-5. **run**
-   - 制作镜像文件和启动
-   - iommu启动大致如下，不同设备间有不同情况
-
-
-```
+# 配置基础环境
 cd $ROOTFS
 dd if=/dev/zero of=rootfs.ext4 bs=1G count=4
 mkfs.ext4 rootfs.ext4
@@ -119,20 +112,79 @@ sudo mount rootfs.ext4 ./tmp
 sudo cp -rp ./temp-rootfs/* ./tmp/
 sudo umount ./tmp
 
+```
+
+-  制作ext4镜像
+
+```
+dd if=/dev/zero of=$ROOTFS/ubuntu-riscv.img bs=1G count=4
+mkfs.ext4 $ROOTFS/ubuntu-riscv.img
+sudo mkdir -p /mnt/riscv-root
+sudo mount -o loop $ROOTFS/ubuntu-riscv.img /mnt/riscv-root
+sudo cp -rp $ROOTFS/* /mnt/riscv-root/
+sudo umount /mnt/riscv-root
+```
+
+
+
+4. **crossing-compile perf**
+
+```
+cd $LINUX/tools/perf
+
+sudo -E PKG_CONFIG_LIBDIR="$SYSROOT/usr/lib/riscv64-linux-gnu/pkgconfig/" \
+    make EXTRA_CFLAGS="--sysroot=$SYSROOT -I$SYSROOT/usr/include" \
+    EXTRA_LDFLAGS="-L$SYSROOT/usr/lib/riscv64-linux-gnu" \
+    ARCH=riscv CROSS_COMPILE=riscv64-linux-gnu- \
+    NO_LIBBPF=1 NO_SDT=1 NO_LIBTRACEEVENT=1 NO_LIBAUDIT=1 \
+    NO_LIBCRYPTO=1 NO_SLANG=1 NO_PERL=1 NO_PYTHON=1 \
+    NO_LZMA=1 NO_ZSTD=1 NO_LIBCAP=1 NO_NUMA=1 \
+    NO_BABELTRACE=1 NO_CAPSTONE=1 NO_PFMLIB=1 \
+    prefix='/usr' install
+sudo mount -o loop $ROOTFS/ubuntu-riscv.img /mnt/riscv-root
+sudo make ARCH=riscv CROSS_COMPILE=riscv64-linux-gnu- \
+     DESTDIR=/mnt/riscv-root install
+sudo umount /mnt/riscv-root
+```
+
+或者
+
+```
+# 登录QEMU环境后执行
+cd /usr/src/linux/tools/perf
+make clean
+make
+make install
+```
+
+还有其他方法，比如魔改rootfs的部署脚本
+
+
+
+
+
+5. **run**
+   - 制作镜像文件和启动
+   - iommu启动选项示意大致如下，不同设备间有不同情况
+
+
+```
+cd $ROOTFS
 $QEMU/build/qemu-system-riscv64 \
-  -M virt,aia=aplic-imsic,aia-guests=5 \
-  -cpu rv64,smaia=true,ssaia=true,smcdeleg=true,ssccfg=true,smcntrpmf=true,sscofpmf=true,sscsrind=true,smcsrind=true,smctr=true,ssctr=true \
-  -icount auto -m 8192 -nographic \
-  -kernel $LINUX/build/arch/riscv/boot/Image \
-  -append "root=/dev/vda rw console=ttyS0 earlycon=sbi iommu=force" \
-  -drive file=$ROOTFS/rootfs.ext4,format=raw,if=none,id=rootfs \
-  -device virtio-blk-pci,drive=rootfs \
-  -netdev user,id=usernet,hostfwd=tcp:127.0.0.1:7723-0.0.0.0:22 \
-  -device e1000e,netdev=usernet \
-  -device virtio-iommu-device,iommu_platform=on \ 
-  -object iommu,type=riscv,perfmon=on \  
-  -smp cores=4,threads=1 \
-  -global virtio-mmio.force-legacy=false 
+  -M virt,aia=aplic-imsic -cpu rv64,smaia=true,ssaia=true \
+  -m 8G -smp 4 -nographic \
+  -kernel $LINUX/arch/riscv/boot/Image \
+  -append "root=/dev/vda rw console=ttyS0 earlycon=sbi" \
+  -drive file=$ROOTFS/ubuntu-riscv.img,format=raw,id=hd0 \
+  -device virtio-blk-device,drive=hd0 \
+  -netdev user,id=net0,hostfwd=tcp::2222-:22 \
+  -device virtio-net-device,netdev=net0  
+  
+ssh -p 2222 root@localhost
+# 密码: riscv，在rootfs那步配置好了
+# 检查 PMU 事件
+ls /sys/bus/event_source/devices/riscv_iommu/events
+perf list
 
 ```
 
